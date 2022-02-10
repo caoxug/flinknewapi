@@ -4,10 +4,6 @@
     <parameters>
       <parameter value="-target:jvm-1.8" />
     </parameters>
-    <profile name="Maven 1" modules="flinknewapi">
-      <parameters>
-        <parameter value="-target:jvm-1.8" />
-      </parameters>
-    </profile>
+    <profile name="Maven 1" modules="flinknewapi" />
   </component>
 </project>

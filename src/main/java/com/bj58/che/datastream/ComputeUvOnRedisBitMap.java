@@ -1,0 +1,165 @@
+//package com.bj58.che.datastream;
+//
+//import com.bj58.che.entity.PageViewCount;
+//import com.bj58.che.entity.UserBehavior;
+//import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+//import org.apache.flink.api.common.serialization.SimpleStringSchema;
+//import org.apache.flink.configuration.Configuration;
+//import org.apache.flink.streaming.api.TimeCharacteristic;
+//import org.apache.flink.streaming.api.datastream.DataStream;
+//import org.apache.flink.streaming.api.datastream.DataStreamSource;
+//import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+//import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+//import org.apache.flink.streaming.api.functions.windowing.ProcessAllWindowFunction;
+//import org.apache.flink.streaming.api.windowing.time.Time;
+//import org.apache.flink.streaming.api.windowing.triggers.Trigger;
+//import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
+//import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+//import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
+//import org.apache.flink.util.Collector;
+//import redis.clients.jedis.Jedis;
+//
+//import java.time.Duration;
+//import java.util.Properties;
+//
+///**
+// * @author caoxuguang
+// * @Description:
+// * @date 2021/11/17 4:06 下午
+// */
+//
+///*
+//        -- 窗口1511650000
+//        543461,1715,1464116,pv,1511658000
+//        -- 窗口1511660000
+//        543462,1715,1464116,pv,1511660001
+//        543463,1715,1464116,pv,1511662000
+//        543463,1715,1464116,pv,1511663000
+//        --
+//        543463,1715,1464116,pv,1511663001
+//        543463,1715,1464116,pv,1511664003
+//        543464,1715,1464116,pv,1511665000
+//        -- 窗口1511670000
+//        543465,1715,1464116,pv,1511675000
+// */
+//public class ComputeUvOnRedisBitMap {
+//    public static void main(String[] args) throws Exception {
+//        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+//        env.setParallelism(4);
+//        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+//        Properties prop = new Properties();
+//        prop.setProperty("bootstrap.servers", "localhost:9092");
+//        prop.setProperty("group.id", "cxg");
+//        FlinkKafkaConsumer<String> fkc = new FlinkKafkaConsumer<String>("test01", new SimpleStringSchema(), prop);
+//        DataStreamSource<String> inputStream = env.addSource(fkc);
+//        DataStream<UserBehavior> dataStream = inputStream
+//                .map(line -> {
+//                    String[] fields = line.split(",");
+//                    return new UserBehavior(new Long(fields[0]), new Long(fields[1]), new Integer(fields[2]), fields[3], new Long(fields[4]));
+//                })
+//                .assignTimestampsAndWatermarks(WatermarkStrategy
+//                        .<UserBehavior>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+//                        .withTimestampAssigner((event, timestamp) -> event.getDataTimestamp()));
+//        SingleOutputStreamOperator<UserBehavior> pvData = dataStream.filter(data -> "pv".equals(data.getBehavior()));
+//        SingleOutputStreamOperator<PageViewCount> uv = pvData
+//                .timeWindowAll(Time.seconds(10))
+//                .trigger(new MyTrigger())
+//                .process(new UvCountResultWithBloomFliter());
+//        uv.print();
+//
+//        env.execute("ComputeUvOnRedisBitMap");
+//    }
+//
+//    public static class MyTrigger extends Trigger<UserBehavior, TimeWindow> {
+//        @Override
+//        public TriggerResult onElement(UserBehavior element, long timestamp, TimeWindow window, TriggerContext ctx) throws Exception {
+//            // 每一条数据来到，直接触发窗口计算，并且直接清空窗口
+//            return TriggerResult.FIRE_AND_PURGE;
+//        }
+//
+//        @Override
+//        public TriggerResult onProcessingTime(long time, TimeWindow window, TriggerContext ctx) throws Exception {
+//            return TriggerResult.CONTINUE;
+//        }
+//
+//        @Override
+//        public TriggerResult onEventTime(long time, TimeWindow window, TriggerContext ctx) throws Exception {
+//            return TriggerResult.CONTINUE;
+//        }
+//
+//        @Override
+//        public void clear(TimeWindow window, TriggerContext ctx) throws Exception {
+//        }
+//    }
+//    // 自定义一个布隆过滤器
+//    public static class MyBloomFilter {
+//        // 定义位图的大小，一般需要定义为2的整次幂
+//        private Integer cap;
+//
+//        public MyBloomFilter(Integer cap) {
+//            this.cap = cap;
+//        }
+//        // 实现一个hash函数
+//        public Long hashCode( String value, Integer seed ){
+//            Long result = 0L;
+//            for( int i = 0; i < value.length(); i++ ){
+//                result = result * seed + value.charAt(i);
+//            }
+//            return result & (cap - 1);
+//        }
+//    }
+//    public static class UvCountResultWithBloomFliter extends ProcessAllWindowFunction<UserBehavior, PageViewCount, TimeWindow> {
+//        Jedis jedis;
+//        MyBloomFilter myBloomFilter;
+//        @Override
+//        public void open(Configuration parameters) throws Exception {
+//            jedis = new Jedis("localhost", 6379);
+//            jedis.auth("123456");
+//            // 要处理1亿个数据，用64MB大小的位图
+//            myBloomFilter = new MyBloomFilter(1<<29);
+//        }
+//
+//        @Override
+//        public void process(Context context, Iterable<UserBehavior> elements, Collector<PageViewCount> out) throws Exception {
+//            // 将位图和窗口count值全部存入redis，用windowEnd作为key
+//            Long windowEnd = context.window().getEnd();
+//            String bitmapKey = windowEnd.toString();
+//            // 把count值存成一张hash表
+//            String countHashName = "uv_count";
+//            String countKey = windowEnd.toString();
+//
+//            // 1. 取当前的userId
+//            Long userId = elements.iterator().next().getUserId();
+//
+//            // 2. 计算位图中的offset
+//            Long offset = myBloomFilter.hashCode(userId.toString(), 61);
+//
+//            // 3. 用redis的getbit命令，判断对应位置的值
+//            Boolean isExist = jedis.getbit(bitmapKey, offset);
+//
+//            //通过redis的布隆过滤器判断是否已存在，不存在再去redis的hash里存（hash名为'uv_count'，字段名为窗口结束时间，字段值为uv）
+//            if( !isExist ) {
+//                // 如果不存在，对应位图位置置为1
+//                jedis.setbit(bitmapKey, offset, true);
+//
+//                // 更新redis中保存的count值
+//                Long uvCount = 0L;    // 初始count值
+//                //当前窗口的uv值
+//                String uvCountString = jedis.hget(countHashName, countKey);
+//                //如果当前窗口有uv值，将uv值设置为原有值+1
+//                if (uvCountString != null && !"".equals(uvCountString))
+//                    uvCount = Long.valueOf(uvCountString);
+//                jedis.hset(countHashName, countKey, String.valueOf(uvCount + 1));
+//
+//                out.collect(new PageViewCount("uv", windowEnd, uvCount + 1));
+//            }
+//        }
+//
+//        @Override
+//        public void close() throws Exception {
+//            jedis.close();
+//        }
+//
+//    }
+//
+//}
