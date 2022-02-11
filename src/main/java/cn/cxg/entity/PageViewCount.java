@@ -1,4 +1,4 @@
-package com.bj58.che.entity;
+package cn.cxg.entity;
 
 public class PageViewCount {
     private String url;

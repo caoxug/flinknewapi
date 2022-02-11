@@ -8,7 +8,6 @@ import org.apache.log4j.Logger;
  */
 @Slf4j
 public class TestAll {
-//    private static Logger log = Logger.getLogger("Test");
     public static void main(String[] args) {
         log.info("ddd");
     }
